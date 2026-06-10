@@ -47,4 +47,4 @@ FROM amplitude_events_raw;
 
 //CHECK THE NUMBER OF FILE NAMES MATCHES THE AMOUNT SHOWN IN S3
 -----------------------------------
-SELECT DISTINCT FILENAME FROM amplitude_events_raw_python;
+SELECT DISTINCT FILENAME FROM amplitude_events_raw;

@@ -10,7 +10,8 @@ AS
             $1,
             metadata$filename
         FROM @<stage-name>)
-    FILE_FORMAT = (FORMAT_NAME = <file-format-name>);
+    FILE_FORMAT = (FORMAT_NAME = <file-format-name>)
+    FORCE = FALSE;
 
 //RUN SHOW PIPE TO OBTAIN NOTIFICATION CHANNEL AND ADD TO S3 BUCKET
 -- login to aws → go to s3 bucket → properties → event notifications
