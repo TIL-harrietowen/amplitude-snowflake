@@ -20,7 +20,8 @@ with join_tables as (
         p.element_url,
         lead(e.event_time) over (partition by session_id order by event_time) as next_event_time,
         lag(e.event_type) over (partition by session_id order by event_time) as previous_event_type,
-        lag(p.page_url) over (partition by session_id order by event_time) as previous_page_url
+        lag(p.page_url) over (partition by session_id order by event_time) as previous_page_url,
+        e.extract_timestamp
     from fct_all_session_events e
     left join dim_event_pages p
         on e.event_uuid = p.event_uuid
@@ -53,7 +54,8 @@ with join_tables as (
         (case
             when previous_event_type = 'Element Clicked' and page_url = previous_page_url then true
             else false
-        end) as click_error
+        end) as click_error,
+        extract_timestamp
     from join_tables
 )
 
