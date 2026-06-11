@@ -21,6 +21,8 @@ create or replace table dim_event_pages as (
         event_uuid,
         page_url,
         page_counter,
+        REGEXP_SUBSTR(page_url, '/([^/]+)/?$', 1, 1, 'e') as page_title,
+        REGEXP_SUBSTR(page_url, '/([^/]+)/[^/]+/?$', 1, 1, 'e', 1) as parent_page_title,
         element_text,
         element_tag,
         element_url,
@@ -29,7 +31,6 @@ create or replace table dim_event_pages as (
     from amplitude_events_base
     where page_url is not null
 );
-
 select * from dim_event_pages;
 
 //BUILD DIM DEVICES TABLE
