@@ -24,7 +24,7 @@ show pipes;
 
 ----------------------------------------------------------------------------
 //CREATE STREAM ON EVENTS_RAW
-CREATE STREAM amplitude_events_raw_stream
+CREATE STREAM events_raw_to_base_stream
 ON TABLE amplitude_events_raw
 append_only=true;
 
@@ -279,9 +279,14 @@ BEGIN
 
     //SESSION_JOURNEY LOAD
     INSERT INTO session_journey (
-        with new_records as (
-            select * from fct_all_session_events
-            where extract_timestamp > (select coalesce(max(extract_timestamp), '1900-01-01') from session_journey)
+        with max_ts as (
+            select coalesce(max(max_extract_timestamp), '1990-01-01'::timestamp) as max_extract_timestamp
+            from session_journey
+        )
+        
+        ,new_records as (
+            select * from fct_all_session_events f, max_ts m
+            where f.extract_timestamp > m.max_extract_timestamp
         )
         
         ,page_view_counts as (
@@ -305,7 +310,8 @@ BEGIN
                 count(*) as total_events,
                 min(e.event_time) as session_start_time,
                 max(e.event_time) as session_end_time,
-                datediff('second',min(e.event_time),max(e.event_time)) as event_duration_s
+                datediff('second',min(e.event_time),max(e.event_time)) as event_duration_s,
+                max(e.extract_timestamp) as max_extract_timestamp
             from new_records e
             left join dim_devices d 
                 on e.device_id = d.device_id
@@ -323,7 +329,8 @@ BEGIN
                 p.total_pages_viewed,
                 e.session_start_time,
                 e.session_end_time,
-                e.event_duration_s
+                e.event_duration_s,
+                e.max_extract_timestamp
             from all_event_counts e
             inner join page_view_counts p 
             on e.session_id = p.session_id
@@ -336,3 +343,43 @@ return 'Amplitude Gold Table Updated: events_raw';
 
 END;
 $$;
+
+
+----------------------------------------------------------------------------
+//CHECK STORED PROCEDURES WORK
+call sp_events_raw_to_base();
+call sp_amplitude_silver();
+call sp_amplitude_gold();
+
+----------------------------------------------------------------------------
+//TASKS
+
+--task: raw to base
+create or replace task task_events_raw_to_base
+warehouse = ''
+schedule = '1 minute'
+when system$stream_has_data('EVENTS_RAW_TO_BASE_STREAM')
+as
+call sp_events_raw_to_base();
+
+alter task task_events_raw_to_base resume;
+
+
+--task: base to silver
+create or replace task task_events_base_to_silver
+warehouse = ''
+after task_events_raw_to_base
+as
+call sp_amplitude_silver();
+
+alter task task_events_base_to_silver resume;
+
+
+--task: silver to gold
+create task task_events_silver_to_gold
+warehouse = core_wh
+after task_events_base_to_silver
+as
+call sp_amplitude_gold();
+
+alter task task_events_silver_to_gold resume;

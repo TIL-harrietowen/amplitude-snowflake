@@ -20,7 +20,7 @@ INSERT INTO amplitude_events_base (
             json_data:event_properties."[Amplitude] Element Href"::varchar as element_url,
             to_timestamp(REGEXP_SUBSTR(filename, '\\d{4}-\\d{2}-\\d{2}_\\d{1,2}'), 'YYYY-MM-DD_HH24') as extract_timestamp,
             current_timestamp()::timestamp as load_timestamp
-        from amplitude_events_raw_stream
+        from events_raw_to_base_stream
 ),
     
     event_type_cleaning as (
@@ -229,9 +229,14 @@ INSERT INTO all_events (
 //INSERT INTO SESSION_JOURNEY
 --filter for new rows is in the first CTE
 INSERT INTO session_journey (
-    with new_records as (
-        select * from fct_all_session_events
-        where extract_timestamp > (select coalesce(max(extract_timestamp), '1900-01-01') from session_journey)
+    with max_ts as (
+        select coalesce(max(max_extract_timestamp), '1990-01-01'::timestamp) as max_extract_timestamp
+        from session_journey
+    )
+    
+    ,new_records as (
+        select * from fct_all_session_events f, max_ts m
+        where f.extract_timestamp > m.max_extract_timestamp
     )
     
     ,page_view_counts as (
@@ -255,7 +260,8 @@ INSERT INTO session_journey (
             count(*) as total_events,
             min(e.event_time) as session_start_time,
             max(e.event_time) as session_end_time,
-            datediff('second',min(e.event_time),max(e.event_time)) as event_duration_s
+            datediff('second',min(e.event_time),max(e.event_time)) as event_duration_s,
+            max(e.extract_timestamp) as max_extract_timestamp
         from new_records e
         left join dim_devices d 
             on e.device_id = d.device_id
@@ -273,11 +279,11 @@ INSERT INTO session_journey (
             p.total_pages_viewed,
             e.session_start_time,
             e.session_end_time,
-            e.event_duration_s
+            e.event_duration_s,
+            e.max_extract_timestamp
         from all_event_counts e
         inner join page_view_counts p 
         on e.session_id = p.session_id
     )
     select * from join_tables
 );
-
