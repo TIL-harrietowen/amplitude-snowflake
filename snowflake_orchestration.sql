@@ -356,7 +356,7 @@ CALL sp_amplitude_gold();
 
 --task: raw to base
 CREATE OR REPLACE TASK task_events_raw_to_base
-    WAREHOUSE = core_wh
+    WAREHOUSE = '<your-warehouse-name>'
     SCHEDULE = 'USING CRON 0 9 * * * Europe/London'
     USER_TASK_TIMEOUT_MS = 60000    --Each task runs after one minute, with a 60-second timeout.
     TASK_AUTO_RETRY_ATTEMPTS = 2    --If a task fails, retry it twice, else entire task graph fails.
@@ -370,7 +370,7 @@ ALTER TASK task_events_raw_to_base RESUME;
 
 --task: base to silver
 CREATE OR REPLACE TASK task_events_base_to_silver
-WAREHOUSE = ''
+WAREHOUSE = '<your-warehouse-name>'
 AFTER task_events_raw_to_base
 AS
 CALL sp_amplitude_silver();
@@ -380,7 +380,7 @@ ALTER TASK task_events_base_to_silver RESUME;
 
 --task: silver to gold
 CREATE OR REPLACE TASK task_events_silver_to_gold
-WAREHOUSE = ''
+WAREHOUSE = '<your-warehouse-name>'
 AFTER task_events_base_to_silver
 AS
 CALL sp_amplitude_gold();
