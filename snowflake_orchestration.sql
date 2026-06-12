@@ -315,7 +315,7 @@ BEGIN
             FROM new_records e
             LEFT JOIN dim_devices d
                 ON e.device_id = d.device_id
-            GROUP BY e.session_id, d.device_id, d.device_type, d.platform, e.extract_timestamp
+            GROUP BY e.session_id, d.device_id, d.device_type, d.platform
         )
 
         ,join_tables AS (
@@ -361,7 +361,7 @@ CREATE OR REPLACE TASK task_events_raw_to_base
     USER_TASK_TIMEOUT_MS = 60000    --Each task runs after one minute, with a 60-second timeout.
     TASK_AUTO_RETRY_ATTEMPTS = 2    --If a task fails, retry it twice, else entire task graph fails.
     SUSPEND_TASK_AFTER_NUM_FAILURES = 3     --If task graph fails 3 times in a row, suspend the task.
-    WHEN SYSTEM$STREAM_HAS_DATA('EVENTS_RAW_TO_BASE_STREAM')
+    WHEN SYSTEM$STREAM_HAS_DATA('amplitude_events_raw_stream')
     AS
     CALL sp_events_raw_to_base();
 
@@ -379,8 +379,8 @@ ALTER TASK task_events_base_to_silver RESUME;
 
 
 --task: silver to gold
-CREATE TASK task_events_silver_to_gold
-WAREHOUSE = core_wh
+CREATE OR REPLACE TASK task_events_silver_to_gold
+WAREHOUSE = ''
 AFTER task_events_base_to_silver
 AS
 CALL sp_amplitude_gold();

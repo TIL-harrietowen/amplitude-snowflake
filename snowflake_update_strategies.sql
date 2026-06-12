@@ -265,7 +265,7 @@ INSERT INTO session_journey (
         FROM new_records e
         LEFT JOIN dim_devices d
             ON e.device_id = d.device_id
-        GROUP BY e.session_id, d.device_id, d.device_type, d.platform, e.extract_timestamp
+        GROUP BY e.session_id, d.device_id, d.device_type, d.platform
     )
 
     ,join_tables AS (
