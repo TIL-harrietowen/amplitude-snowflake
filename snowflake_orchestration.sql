@@ -1,14 +1,14 @@
 //CREATE SNOWPIPE TO AUTOMATE (STREAM) THE 'COPY INTO' THE RAW TABLE FROM S3
 CREATE OR REPLACE PIPE amplitude_events_pipe
     --snowpipe polls the event notifications from the data load metadata
-    auto_ingest=true
+    AUTO_INGEST = TRUE
 AS
     --load the s3 bucket data into the empty table
     COPY INTO amplitude_events_raw
     FROM
         (SELECT
             $1,
-            metadata$filename
+            METADATA$FILENAME
         FROM @amplitude-stage)
     FILE_FORMAT = (FORMAT_NAME = amplitude-file-format)
     FORCE = FALSE;
@@ -20,50 +20,50 @@ AS
 -- 3. object creation: all objects
 -- 4. select sqs queue
 -- 5. paste in notification_channel value
-show pipes;
+SHOW PIPES;
 
 ----------------------------------------------------------------------------
 //CREATE STREAM ON EVENTS_RAW
-CREATE STREAM events_raw_to_base_stream
+CREATE STREAM amplitude_events_raw_stream
 ON TABLE amplitude_events_raw
-append_only=true;
+APPEND_ONLY = TRUE;
 
 //CHECK STREAM
-select * from amplitude_events_raw_stream;
+SELECT * FROM amplitude_events_raw_stream;
 
 ----------------------------------------------------------------------------
 //STORED PROCEDURE RAW TO BASE
-create or replace procedure sp_events_raw_to_base()
-    returns varchar
-    language SQL
-as
+CREATE OR REPLACE PROCEDURE sp_events_raw_to_base()
+    RETURNS VARCHAR
+    LANGUAGE SQL
+AS
 $$
 BEGIN
 INSERT INTO amplitude_events_base (
-    with json_extraction as (
-        select 
-            json_data:uuid::varchar as event_uuid,
-            json_data:session_id::varchar as session_id,
-            json_data:device_id::varchar as device_id,
-            json_data:device_type::varchar as device_type,
-            json_data:device_family::varchar as device_family,
-            json_data:platform::varchar as platform,
-            json_data:os_version::varchar as os_version,
-            json_data:os_name::varchar as os_name,
-            json_data:event_type::varchar as event_type,
-            json_data:event_time::timestamp as event_time,
-            json_data:event_properties."[Amplitude] Page URL"::varchar as page_url,
-            json_data:event_properties."[Amplitude] Page Counter"::int as page_counter,
-            json_data:event_properties."[Amplitude] Element Text"::varchar as element_text,
-            json_data:event_properties."[Amplitude] Element Tag"::varchar as element_tag,
-            json_data:event_properties."[Amplitude] Element Href"::varchar as element_url,
-            to_timestamp(REGEXP_SUBSTR(filename, '\\d{4}-\\d{2}-\\d{2}_\\d{1,2}'), 'YYYY-MM-DD_HH24') as extract_timestamp,
-            current_timestamp()::timestamp as load_timestamp
-        from amplitude_events_raw_stream
+    WITH json_extraction AS (
+        SELECT
+            json_data:uuid::VARCHAR AS event_uuid,
+            json_data:session_id::VARCHAR AS session_id,
+            json_data:device_id::VARCHAR AS device_id,
+            json_data:device_type::VARCHAR AS device_type,
+            json_data:device_family::VARCHAR AS device_family,
+            json_data:platform::VARCHAR AS platform,
+            json_data:os_version::VARCHAR AS os_version,
+            json_data:os_name::VARCHAR AS os_name,
+            json_data:event_type::VARCHAR AS event_type,
+            json_data:event_time::TIMESTAMP AS event_time,
+            json_data:event_properties."[Amplitude] Page URL"::VARCHAR AS page_url,
+            json_data:event_properties."[Amplitude] Page Counter"::INT AS page_counter,
+            json_data:event_properties."[Amplitude] Element Text"::VARCHAR AS element_text,
+            json_data:event_properties."[Amplitude] Element Tag"::VARCHAR AS element_tag,
+            json_data:event_properties."[Amplitude] Element Href"::VARCHAR AS element_url,
+            TO_TIMESTAMP(REGEXP_SUBSTR(filename, '\\d{4}-\\d{2}-\\d{2}_\\d{1,2}'), 'YYYY-MM-DD_HH24') AS extract_timestamp,
+            CURRENT_TIMESTAMP()::TIMESTAMP AS load_timestamp
+        FROM amplitude_events_raw_stream
 ),
-    
-    event_type_cleaning as (
-        select
+
+    event_type_cleaning AS (
+        SELECT
             event_uuid,
             session_id,
             device_id,
@@ -72,11 +72,11 @@ INSERT INTO amplitude_events_base (
             platform,
             os_version,
             os_name,
-            INITCAP(case
-                when contains(event_type,'[Amplitude]') then replace(event_type,'[Amplitude] ','')
-                when contains(event_type,'_') then replace(event_type,'_',' ')
-                else event_type
-            end)::varchar() as event_type,
+            INITCAP(CASE
+                WHEN CONTAINS(event_type,'[Amplitude]') THEN REPLACE(event_type,'[Amplitude] ','')
+                WHEN CONTAINS(event_type,'_') THEN REPLACE(event_type,'_',' ')
+                ELSE event_type
+            END)::VARCHAR() AS event_type,
             event_time,
             page_url,
             page_counter,
@@ -85,22 +85,22 @@ INSERT INTO amplitude_events_base (
             element_url,
             extract_timestamp,
             load_timestamp
-    from json_extraction
+    FROM json_extraction
     )
-    
-    select * from event_type_cleaning
+
+    SELECT * FROM event_type_cleaning
 );
-return 'Amplitude raw to base update completed';
+RETURN 'Amplitude raw to base update completed';
 
 END;
 $$;
 
 ----------------------------------------------------------------------------
 //STORED PROCEDURE BASE TO SILVER
-create or replace procedure sp_amplitude_silver()
-    returns varchar
-    language SQL
-as
+CREATE OR REPLACE PROCEDURE sp_amplitude_silver()
+    RETURNS VARCHAR
+    LANGUAGE SQL
+AS
 $$
 BEGIN
     //FCT_ALL_SESSION_EVENTS LOAD
@@ -112,42 +112,42 @@ BEGIN
             event_type,
             event_time,
             extract_timestamp,
-            current_timestamp()::timestamp as load_timestamp
+            CURRENT_TIMESTAMP()::TIMESTAMP AS load_timestamp
         FROM amplitude_events_base
         WHERE extract_timestamp > (
-            SELECT COALESCE(MAX(extract_timestamp), '1900-01-01') 
+            SELECT COALESCE(MAX(extract_timestamp), '1900-01-01')
             FROM fct_all_session_events)
     );
 
     //DIM_EVENT_PAGES LOAD
     INSERT INTO dim_event_pages (
-        select 
+        SELECT
             event_uuid,
             page_url,
             page_counter,
-            REGEXP_SUBSTR(page_url, '/([^/]+)/?$', 1, 1, 'e') as page_title,
-            REGEXP_SUBSTR(page_url, '/([^/]+)/[^/]+/?$', 1, 1, 'e', 1) as parent_page_title,
+            REGEXP_SUBSTR(page_url, '/([^/]+)/?$', 1, 1, 'e') AS page_title,
+            REGEXP_SUBSTR(page_url, '/([^/]+)/[^/]+/?$', 1, 1, 'e', 1) AS parent_page_title,
             element_text,
             element_tag,
             element_url,
             extract_timestamp,
-            current_timestamp()::timestamp as load_timestamp
-        from amplitude_events_base
-        where page_url is not null
-            and extract_timestamp > (SELECT MAX(extract_timestamp) FROM dim_event_pages)
+            CURRENT_TIMESTAMP()::TIMESTAMP AS load_timestamp
+        FROM amplitude_events_base
+        WHERE page_url IS NOT NULL
+            AND extract_timestamp > (SELECT MAX(extract_timestamp) FROM dim_event_pages)
     );
 
     //DIM_DEVICES LOAD
-    MERGE INTO dim_devices as target
-    USING 
-        (SELECT 
+    MERGE INTO dim_devices AS target
+    USING
+        (SELECT
             device_id,
             device_type,
             device_family,
             platform,
             os_version,
             os_name,
-            current_timestamp()::timestamp as load_timestamp
+            CURRENT_TIMESTAMP()::TIMESTAMP AS load_timestamp
         FROM (
             SELECT DISTINCT
                 device_id,
@@ -158,9 +158,9 @@ BEGIN
                 os_name,
                 extract_timestamp
             FROM amplitude_events_base
-            qualify row_number() over (partition by device_id order by extract_timestamp desc) = 1
-        )) as source
-    on target.device_id = source.device_id
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY extract_timestamp DESC) = 1
+        )) AS source
+    ON target.device_id = source.device_id
     WHEN MATCHED AND (
         target.device_type IS DISTINCT FROM source.device_type
         OR target.device_family IS DISTINCT FROM source.device_family
@@ -172,13 +172,13 @@ BEGIN
             target.device_family = source.device_family,
             target.os_version = source.os_version,
             target.os_name = source.os_name
-    WHEN NOT MATCHED THEN 
+    WHEN NOT MATCHED THEN
         INSERT (device_id,
                 device_type,
                 device_family,
                 platform,
                 os_version,
-                os_name, 
+                os_name,
                 load_timestamp)
         VALUES (source.device_id,
                 source.device_type,
@@ -186,26 +186,26 @@ BEGIN
                 source.platform,
                 source.os_version,
                 source.os_name,
-                current_timestamp()::timestamp)
+                CURRENT_TIMESTAMP()::TIMESTAMP)
     ;
 
-return 'Amplitude base to silver update completed';
+RETURN 'Amplitude base to silver update completed';
 
 END;
 $$;
 
 ----------------------------------------------------------------------------
 //STORED PROCEDURE SILVER TO BASE
-create or replace procedure sp_amplitude_gold()
-    returns varchar
-    language SQL
-as
+CREATE OR REPLACE PROCEDURE sp_amplitude_gold()
+    RETURNS VARCHAR
+    LANGUAGE SQL
+AS
 $$
 BEGIN
     //ALL_EVENTS LOAD
     INSERT INTO all_events (
-        with join_tables as (
-            select
+        WITH join_tables AS (
+            SELECT
                 e.event_uuid,
                 e.session_id,
                 e.device_id,
@@ -220,19 +220,19 @@ BEGIN
                 p.element_text,
                 p.element_tag,
                 p.element_url,
-                lead(e.event_time) over (partition by session_id order by event_time) as next_event_time,
-                lag(e.event_type) over (partition by session_id order by event_time) as previous_event_type,
-                lag(p.page_url) over (partition by session_id order by event_time) as previous_page_url,
+                LEAD(e.event_time) OVER (PARTITION BY session_id ORDER BY event_time) AS next_event_time,
+                LAG(e.event_type) OVER (PARTITION BY session_id ORDER BY event_time) AS previous_event_type,
+                LAG(p.page_url) OVER (PARTITION BY session_id ORDER BY event_time) AS previous_page_url,
                 e.extract_timestamp
-            from fct_all_session_events e
-            left join dim_event_pages p
-                on e.event_uuid = p.event_uuid
-            left join dim_devices d
-                on e.device_id = d.device_id
+            FROM fct_all_session_events e
+            LEFT JOIN dim_event_pages p
+                ON e.event_uuid = p.event_uuid
+            LEFT JOIN dim_devices d
+                ON e.device_id = d.device_id
         )
-        
-        ,calculations as (
-            select
+
+        ,calculations AS (
+            SELECT
                 event_uuid,
                 session_id,
                 device_id,
@@ -240,8 +240,8 @@ BEGIN
                 platform,
                 event_type,
                 event_time,
-                (datediff('second',event_time,next_event_time)*1.0) as event_duration_s,
-                row_number() over (partition by session_id order by event_time) as event_counter,
+                (DATEDIFF('second',event_time,next_event_time)*1.0) AS event_duration_s,
+                ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY event_time) AS event_counter,
                 page_url,
                 page_counter,
                 page_title,
@@ -249,77 +249,77 @@ BEGIN
                 element_text,
                 element_tag,
                 element_url,
-                (case 
-                    when event_type = previous_event_type and page_url = previous_page_url then true
-                    else false 
-                end) as previous_event_repeated,
-                (case
-                    when previous_event_type = 'Element Clicked' and page_url = previous_page_url then true
-                    else false
-                end) as click_error,
+                (CASE
+                    WHEN event_type = previous_event_type AND page_url = previous_page_url THEN TRUE
+                    ELSE FALSE
+                END) AS previous_event_repeated,
+                (CASE
+                    WHEN previous_event_type = 'Element Clicked' AND page_url = previous_page_url THEN TRUE
+                    ELSE FALSE
+                END) AS click_error,
                 extract_timestamp
-            from join_tables
-        )
-        
-        , max_ts as (
-            select coalesce(max(extract_timestamp), '1990-01-01'::timestamp) as max_extract_timestamp
-            from all_events
+            FROM join_tables
         )
 
-        , filtered as (
-            select c.*
-            from calculations c, max_ts m
-            where c.extract_timestamp > m.max_extract_timestamp
+        , max_ts AS (
+            SELECT COALESCE(MAX(extract_timestamp), '1990-01-01'::TIMESTAMP) AS max_extract_timestamp
+            FROM all_events
         )
 
-        select *
-        from filtered
-        order by session_id, event_time
+        , filtered AS (
+            SELECT c.*
+            FROM calculations c, max_ts m
+            WHERE c.extract_timestamp > m.max_extract_timestamp
+        )
+
+        SELECT *
+        FROM filtered
+        ORDER BY session_id, event_time
     );
 
     //SESSION_JOURNEY LOAD
     INSERT INTO session_journey (
-        with max_ts as (
-            select coalesce(max(max_extract_timestamp), '1990-01-01'::timestamp) as max_extract_timestamp
-            from session_journey
+        WITH max_ts AS (
+            SELECT COALESCE(MAX(extract_timestamp), '1990-01-01'::TIMESTAMP) AS max_extract_timestamp
+            FROM session_journey
         )
-        
-        ,new_records as (
-            select * from fct_all_session_events f, max_ts m
-            where f.extract_timestamp > m.max_extract_timestamp
+
+        ,new_records AS (
+            SELECT * FROM fct_all_session_events f, max_ts m
+            WHERE f.extract_timestamp > m.max_extract_timestamp
         )
-        
-        ,page_view_counts as (
-            select
+
+        ,page_view_counts AS (
+            SELECT
                 e.session_id,
-                listagg(p.page_title,', ') as page_path,
-                count(*) as total_pages_viewed
-            from new_records e
-            left join dim_event_pages p
-                on e.event_uuid = p.event_uuid
-            where e.event_type = 'Page Viewed'
-            group by e.session_id
+                LISTAGG(p.page_title,', ') AS page_path,
+                COUNT(*) AS total_pages_viewed
+            FROM new_records e
+            LEFT JOIN dim_event_pages p
+                ON e.event_uuid = p.event_uuid
+            WHERE e.event_type = 'Page Viewed'
+            GROUP BY e.session_id
         )
-        
-        , all_event_counts as (
-            select
+
+        , all_event_counts AS (
+            SELECT
                 e.session_id,
                 d.device_id,
                 d.device_type,
                 d.platform,
-                count(*) as total_events,
-                min(e.event_time) as session_start_time,
-                max(e.event_time) as session_end_time,
-                datediff('second',min(e.event_time),max(e.event_time)) as event_duration_s,
-                max(e.extract_timestamp) as max_extract_timestamp
-            from new_records e
-            left join dim_devices d 
-                on e.device_id = d.device_id
-            group by e.session_id, d.device_id, d.device_type, d.platform, e.extract_timestamp 
+                COUNT(*) AS total_events,
+                MIN(e.event_time) AS session_start_time,
+                MAX(e.event_time) AS session_end_time,
+                DATEDIFF('second',MIN(e.event_time),MAX(e.event_time)) AS event_duration_s,
+                MAX(e.extract_timestamp) AS extract_timestamp
+            FROM new_records e
+            LEFT JOIN dim_devices d
+                ON e.device_id = d.device_id
+            GROUP BY e.session_id, d.device_id, d.device_type, d.platform, e.extract_timestamp
         )
-        
-        ,join_tables as (
-            select
+
+        ,join_tables AS (
+            SELECT
                 e.session_id,
                 e.device_id,
                 e.device_type,
@@ -330,16 +330,16 @@ BEGIN
                 e.session_start_time,
                 e.session_end_time,
                 e.event_duration_s,
-                e.max_extract_timestamp
-            from all_event_counts e
-            inner join page_view_counts p 
-            on e.session_id = p.session_id
+                e.extract_timestamp
+            FROM all_event_counts e
+            INNER JOIN page_view_counts p
+            ON e.session_id = p.session_id
         )
-        select * from join_tables
+        SELECT * FROM join_tables
     );
 
 
-return 'Amplitude Gold Table Updated: events_raw';
+RETURN 'Amplitude Gold Table Updated: events_raw';
 
 END;
 $$;
@@ -347,39 +347,42 @@ $$;
 
 ----------------------------------------------------------------------------
 //CHECK STORED PROCEDURES WORK
-call sp_events_raw_to_base();
-call sp_amplitude_silver();
-call sp_amplitude_gold();
+CALL sp_events_raw_to_base();
+CALL sp_amplitude_silver();
+CALL sp_amplitude_gold();
 
 ----------------------------------------------------------------------------
 //TASKS
 
 --task: raw to base
-create or replace task task_events_raw_to_base
-warehouse = ''
-schedule = '1 minute'
-when system$stream_has_data('EVENTS_RAW_TO_BASE_STREAM')
-as
-call sp_events_raw_to_base();
+CREATE OR REPLACE TASK task_events_raw_to_base
+    WAREHOUSE = core_wh
+    SCHEDULE = 'USING CRON 0 9 * * * Europe/London'
+    USER_TASK_TIMEOUT_MS = 60000    --Each task runs after one minute, with a 60-second timeout.
+    TASK_AUTO_RETRY_ATTEMPTS = 2    --If a task fails, retry it twice, else entire task graph fails.
+    SUSPEND_TASK_AFTER_NUM_FAILURES = 3     --If task graph fails 3 times in a row, suspend the task.
+    WHEN SYSTEM$STREAM_HAS_DATA('EVENTS_RAW_TO_BASE_STREAM')
+    AS
+    CALL sp_events_raw_to_base();
 
-alter task task_events_raw_to_base resume;
+ALTER TASK task_events_raw_to_base RESUME;
 
 
 --task: base to silver
-create or replace task task_events_base_to_silver
-warehouse = ''
-after task_events_raw_to_base
-as
-call sp_amplitude_silver();
+CREATE OR REPLACE TASK task_events_base_to_silver
+WAREHOUSE = ''
+AFTER task_events_raw_to_base
+AS
+CALL sp_amplitude_silver();
 
-alter task task_events_base_to_silver resume;
+ALTER TASK task_events_base_to_silver RESUME;
 
 
 --task: silver to gold
-create task task_events_silver_to_gold
-warehouse = core_wh
-after task_events_base_to_silver
-as
-call sp_amplitude_gold();
+CREATE TASK task_events_silver_to_gold
+WAREHOUSE = core_wh
+AFTER task_events_base_to_silver
+AS
+CALL sp_amplitude_gold();
 
-alter task task_events_silver_to_gold resume;
+ALTER TASK task_events_silver_to_gold RESUME;

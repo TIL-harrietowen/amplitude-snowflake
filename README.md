@@ -1,14 +1,14 @@
 # Amplitude Snowflake
 
-A set of Snowflake SQL scripts that load raw Amplitude event data from AWS S3 and transform it through a medallion architecture (raw → bronze → silver → gold).
+A set of Snowflake SQL scripts that load raw Amplitude event data from AWS S3 and transform it through a medallion architecture (raw → bronze → silver → gold), with stored procedures orchestrating each layer transition.
 
 This repo is part of a wider pipeline:
 
-| Stage                       | Repo                                                                                          |
-| --------------------------- | --------------------------------------------------------------------------------------------- |
-| Extract + S3 load           | [amplitude-python-extraction](https://github.com/TIL-harrietowen/amplitude-python-extraction) |
-| Snowflake load + transform  | **This repo**                                                                                 |
-| dbt transform (alternative) | [amplitude-dbt](https://github.com/TIL-harrietowen/amplitude-dbt)                             |
+| Stage                       | Repo                                                                              |
+| --------------------------- | --------------------------------------------------------------------------------- |
+| Extract + S3 load           | [Amplitude-API-Project](https://github.com/TIL-harrietowen/Amplitude-API-Project) |
+| Snowflake load + transform  | **This repo**                                                                     |
+| dbt transform (alternative) | Amplitude-dbt                                                                     |
 
 ---
 
@@ -16,21 +16,21 @@ This repo is part of a wider pipeline:
 
 ```
 S3 (JSON files)
-    │
+    │   Snowpipe (auto-ingest on file arrival)
     ▼
-amplitude_events_raw        ← raw: full JSON + filename as VARIANT, loaded via COPY INTO / Snowpipe
-    │
+amplitude_events_raw              ← raw:    full JSON + filename stored as VARIANT
+    │   Stream (append-only) → sp_events_raw_to_base()
     ▼
-amplitude_events_base       ← bronze: JSON extracted to typed columns, event types cleaned
-    │
+amplitude_events_base             ← bronze: typed fields extracted, event types cleaned
+    │   sp_amplitude_silver()
     ▼
-fct_all_session_events      ← silver: core event fact table
-dim_event_pages             ← silver: page and element attributes per event
-dim_devices                 ← silver: latest device profile per device_id
-    │
+fct_all_session_events            ← silver: core event fact table
+dim_event_pages                   ← silver: page and element attributes per event
+dim_devices                       ← silver: one row per device_id (SCD Type 1 via MERGE)
+    │   sp_amplitude_gold()
     ▼
-all_events                  ← gold: fully joined, enriched event-level table
-session_journey             ← gold: session-level aggregation with page path and duration
+all_events                        ← gold: fully joined, enriched event-level table
+session_journey                   ← gold: session-level aggregation
 ```
 
 ---
@@ -39,11 +39,12 @@ session_journey             ← gold: session-level aggregation with page path a
 
 ```
 amplitude-snowflake/
-├── s3_to_snowflake_load.sql      # Raw layer: storage integration, external stage, raw table, COPY INTO, Snowpipe
-├── amplitude_bronze.sql          # Bronze layer: amplitude_events_base
-├── amplitude_silver.sql          # Silver layer: fct_all_session_events, dim_event_pages, dim_devices
-├── amplitude_gold.sql            # Gold layer: all_events, session_journey
-└── snowflake_orchestration.sql   # Ongoing load: Stream + INSERT INTO pattern
+├── s3_to_snowflake_load.sql        # One-time setup: storage integration, external stage, raw table, COPY INTO, Snowpipe
+├── amplitude_bronze.sql            # Initial build: amplitude_events_base
+├── amplitude_silver.sql            # Initial build: fct_all_session_events, dim_event_pages, dim_devices
+├── amplitude_gold.sql              # Initial build: all_events, session_journey
+├── snowflake_orchestration.sql     # Ongoing loads: Stream + stored procedures for each layer
+└── snowflake_update_strategies.sql # Reference: raw SQL behind each stored procedure (used during development)
 ```
 
 ---
@@ -56,29 +57,73 @@ amplitude-snowflake/
 
 ---
 
+## Running order
+
+Scripts are run in two phases: an initial one-time build, and then ongoing orchestration for new data.
+
+### Phase 1 — one-time setup and initial build
+
+```
+1. s3_to_snowflake_load.sql     — AWS + Snowflake connection setup, raw table creation, initial COPY INTO
+2. amplitude_bronze.sql         — builds amplitude_events_base from the raw table
+3. amplitude_silver.sql         — builds fct_all_session_events, dim_event_pages, dim_devices
+4. amplitude_gold.sql           — builds all_events, session_journey
+5. snowflake_orchestration.sql  — creates Stream, Snowpipe, and stored procedures for ongoing loads
+```
+
+### Phase 2 — ongoing daily loads
+
+Once the orchestration objects are in place, new data flows automatically:
+
+```
+S3 (new JSON files arrive)
+    → Snowpipe loads them into amplitude_events_raw
+    → Stream captures new rows
+    → sp_events_raw_to_base()  — processes stream into amplitude_events_base
+    → sp_amplitude_silver()    — inserts/merges new rows into silver tables
+    → sp_amplitude_gold()      — inserts new rows into gold tables
+```
+
+The stored procedures can be called manually or wired up to a Snowflake Task for scheduled execution.
+
+---
+
 ## Layer by layer
 
 ### Raw — `s3_to_snowflake_load.sql`
 
-Connects Snowflake to S3 and loads raw JSON files into a staging table.
+Connects Snowflake to S3 and loads raw JSON into a staging table.
 
-**Objects created:**
-
-- `<schema>` — dedicated schema for all Amplitude objects
-- `<storage-integration>` — authorisation handshake between Snowflake and AWS (uses IAM Role, not IAM User)
-- `<file-format>` — JSON file format with `STRIP_OUTER_ARRAY = FALSE` (Amplitude files are NDJSON)
-- `<stage>` — external stage pointing to the S3 bucket path
-- `amplitude_events_raw` — raw table with two columns: `json_data VARIANT` and `filename VARCHAR`
+> 💡 **IAM Role vs IAM User** — the Python extraction pipeline uses an IAM User (key + secret). Snowflake uses an IAM Role instead. Access is granted via a trust relationship — no long-lived credentials are stored in Snowflake.
 
 **Setup steps:**
 
-1. Create the storage integration, then run `DESC INTEGRATION` to retrieve `STORAGE_AWS_IAM_USER_ARN` and `STORAGE_AWS_EXTERNAL_ID`
-2. Add these values to the AWS IAM Role's trust policy to complete the two-way handshake
-3. Run `LIST @<stage>` to verify the connection
-4. Run `COPY INTO` once manually to load all existing files
-5. Create the Snowpipe for ongoing automated loads triggered by S3 event notifications
+1. Create the storage integration, passing the AWS Role ARN
+2. Run `DESC INTEGRATION` to retrieve `STORAGE_AWS_IAM_USER_ARN` and `STORAGE_AWS_EXTERNAL_ID`
+3. Add these to the AWS IAM Role's trust policy to complete the two-way handshake
+4. Create the file format, external stage, and raw table
+5. Run `LIST @<stage>` to verify the connection
+6. Run `COPY INTO` once manually to load all existing files
+7. Create the Snowpipe for ongoing automated loads
 
-> ⚠️ **Snowpipe vs Snowflake Task:** Snowpipe triggers on every file arrival and is suited for near-real-time loads. Since Amplitude data is only needed once per day, a Snowflake Task on a fixed daily schedule would be more cost-efficient. Snowpipe is implemented here as a course exercise.
+**Objects created:**
+
+| Object                  | Type                | Purpose                                                                |
+| ----------------------- | ------------------- | ---------------------------------------------------------------------- |
+| `<storage-integration>` | Storage Integration | Authorisation between Snowflake and S3                                 |
+| `<file-format>`         | File Format         | JSON parser (`STRIP_OUTER_ARRAY = FALSE` — Amplitude files are NDJSON) |
+| `<stage>`               | External Stage      | Live pointer to the S3 path — does not store data                      |
+| `amplitude_events_raw`  | Table               | Raw JSON + filename, one row per event                                 |
+| `amplitude_events_pipe` | Snowpipe            | Auto-ingests new files from S3 on arrival                              |
+
+**`amplitude_events_raw` schema:**
+
+| Column      | Type    | Notes                                                                             |
+| ----------- | ------- | --------------------------------------------------------------------------------- |
+| `json_data` | VARIANT | Full raw JSON event object                                                        |
+| `filename`  | VARCHAR | Source filename — encodes the extraction hour, used as incremental key downstream |
+
+> ⚠️ **Snowpipe vs Snowflake Task:** Snowpipe triggers on every file arrival. Since Amplitude data only needs loading once per day, a Snowflake Task on a fixed schedule would be more cost-efficient. Snowpipe is implemented here as a course exercise.
 
 ---
 
@@ -90,13 +135,13 @@ Extracts typed fields from the raw JSON and applies light cleaning. No business 
 
 **What it does:**
 
-- Extracts fields from `json_data` using Snowflake's colon notation (e.g. `json_data:event_type::varchar`)
-- Extracts nested `event_properties` fields using dot notation with quoted Amplitude field names
-- Parses `amplitude_extracted_at` from the filename using `REGEXP_SUBSTR` — this is the source-aligned timestamp used as the incremental key throughout the pipeline
-- Cleans `event_type` values: strips `[Amplitude]` prefixes, replaces underscores with spaces, and applies `INITCAP`
-- Adds a `load_timestamp` using `current_timestamp()` to record when the row entered Snowflake
+- Extracts fields from `json_data` using Snowflake colon notation (e.g. `json_data:event_type::varchar`)
+- Extracts nested `event_properties` using dot notation with quoted Amplitude field names (e.g. `json_data:event_properties."[Amplitude] Page URL"`)
+- Parses `extract_timestamp` from the filename using `REGEXP_SUBSTR` — this is the source-aligned incremental key used throughout all downstream layers
+- Cleans `event_type` values: strips `[Amplitude]` prefixes, replaces underscores with spaces, applies `INITCAP`
+- Adds `load_timestamp` via `current_timestamp()` to record when the row entered Snowflake
 
-**Fields extracted:**
+**Fields:**
 
 | Field               | Source                                                  |
 | ------------------- | ------------------------------------------------------- |
@@ -115,43 +160,45 @@ Extracts typed fields from the raw JSON and applies light cleaning. No business 
 | `element_text`      | `json_data:event_properties."[Amplitude] Element Text"` |
 | `element_tag`       | `json_data:event_properties."[Amplitude] Element Tag"`  |
 | `element_url`       | `json_data:event_properties."[Amplitude] Element Href"` |
-| `extract_timestamp` | Parsed from `filename`                                  |
+| `extract_timestamp` | Parsed from `filename` via `REGEXP_SUBSTR`              |
 | `load_timestamp`    | `current_timestamp()`                                   |
 
 ---
 
 ### Silver — `amplitude_silver.sql`
 
-Splits the bronze table into a fact table and two dimension tables following a star schema pattern.
+Splits the bronze table into a fact table and two dimension tables following a star schema pattern. Used for the initial full build — ongoing loads are handled by `sp_amplitude_silver()`.
 
 **Objects created:**
 
-**`fct_all_session_events`** — one row per event, core event attributes only
+**`fct_all_session_events`** — one row per event
 
-| Field               | Description                                |
-| ------------------- | ------------------------------------------ |
-| `event_uuid`        | Primary key                                |
-| `session_id`        | Session the event belongs to               |
-| `device_id`         | Foreign key to `dim_devices`               |
-| `event_type`        | Cleaned event type                         |
-| `event_time`        | Timestamp of the event                     |
-| `extract_timestamp` | When the data was extracted from Amplitude |
-| `load_timestamp`    | When the row was loaded into Snowflake     |
+| Field               | Description                    |
+| ------------------- | ------------------------------ |
+| `event_uuid`        | Primary key                    |
+| `session_id`        | Session the event belongs to   |
+| `device_id`         | Foreign key to `dim_devices`   |
+| `event_type`        | Cleaned event type             |
+| `event_time`        | Timestamp of the event         |
+| `extract_timestamp` | Source-aligned incremental key |
+| `load_timestamp`    | When the row was loaded        |
 
-**`dim_event_pages`** — page and element context per event (filtered to rows where `page_url` is not null)
+**`dim_event_pages`** — page and element context per event (rows where `page_url is not null`)
 
-| Field               | Description                             |
-| ------------------- | --------------------------------------- |
-| `event_uuid`        | Foreign key to `fct_all_session_events` |
-| `page_url`          | URL of the page                         |
-| `page_counter`      | Page view counter within the session    |
-| `element_text`      | Text of the clicked/interacted element  |
-| `element_tag`       | HTML tag of the element                 |
-| `element_url`       | Href of the element                     |
-| `extract_timestamp` | Source-aligned timestamp                |
-| `load_timestamp`    | Load timestamp                          |
+| Field               | Description                                               |
+| ------------------- | --------------------------------------------------------- |
+| `event_uuid`        | Foreign key to `fct_all_session_events`                   |
+| `page_url`          | Full page URL                                             |
+| `page_counter`      | Page view counter within the session                      |
+| `page_title`        | Last URL segment, extracted via `REGEXP_SUBSTR`           |
+| `parent_page_title` | Second-to-last URL segment, extracted via `REGEXP_SUBSTR` |
+| `element_text`      | Text of the interacted element                            |
+| `element_tag`       | HTML tag of the element                                   |
+| `element_url`       | Href of the element                                       |
+| `extract_timestamp` | Source-aligned incremental key                            |
+| `load_timestamp`    | When the row was loaded                                   |
 
-**`dim_devices`** — one row per `device_id`, using the most recent record via `QUALIFY ROW_NUMBER()`
+**`dim_devices`** — one row per `device_id`, most recent record kept via `QUALIFY ROW_NUMBER()`
 
 | Field            | Description              |
 | ---------------- | ------------------------ |
@@ -161,13 +208,13 @@ Splits the bronze table into a fact table and two dimension tables following a s
 | `platform`       | e.g. Web                 |
 | `os_version`     | Operating system version |
 | `os_name`        | Operating system name    |
-| `load_timestamp` | Load timestamp           |
+| `load_timestamp` | When the row was loaded  |
 
 ---
 
 ### Gold — `amplitude_gold.sql`
 
-Joins and enriches the silver tables into analysis-ready output tables.
+Joins and enriches the silver tables into analysis-ready output tables. Used for the initial full build — ongoing loads are handled by `sp_amplitude_gold()`.
 
 **Objects created:**
 
@@ -175,14 +222,17 @@ Joins and enriches the silver tables into analysis-ready output tables.
 
 Joins `fct_all_session_events`, `dim_event_pages`, and `dim_devices`. Adds:
 
-- `event_duration_s` — time in seconds between this event and the next (`LEAD` window function)
-- `event_counter` — sequential event number within the session (`ROW_NUMBER`)
-- `previous_event_type` — the preceding event type (`LAG`)
-- `previous_page_url` — the preceding page URL (`LAG`)
-- `previous_event_repeated` — boolean flag: same event type on the same page as the previous event
-- `click_error` — boolean flag: an Element Clicked event preceded by another Element Clicked on the same page (potential rage click / error pattern)
+| Field                     | Description                                                                                                       |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `event_duration_s`        | Seconds between this event and the next (`LEAD` window function)                                                  |
+| `event_counter`           | Sequential event number within the session (`ROW_NUMBER`)                                                         |
+| `previous_event_type`     | The preceding event type in the session (`LAG`)                                                                   |
+| `previous_event_repeated` | True if the same event type occurred on the same page as the previous event                                       |
+| `click_error`             | True if an Element Clicked event was preceded by another on the same page — potential rage click or error pattern |
 
-**`session_journey`** — one row per session, session-level aggregation
+> 💡 `all_events` filters for new rows at the final CTE stage (after window function calculations) because `LEAD` and `LAG` require the full session context to calculate correctly — filtering earlier would produce incorrect values.
+
+**`session_journey`** — one row per session
 
 | Field                | Description                                     |
 | -------------------- | ----------------------------------------------- |
@@ -192,7 +242,7 @@ Joins `fct_all_session_events`, `dim_event_pages`, and `dim_devices`. Adds:
 | `platform`           | Platform                                        |
 | `page_path`          | Ordered list of page titles visited (`LISTAGG`) |
 | `total_events`       | Total number of events in the session           |
-| `total_pages_viewed` | Number of Page Viewed events                    |
+| `total_pages_viewed` | Count of Page Viewed events                     |
 | `session_start_time` | First event timestamp                           |
 | `session_end_time`   | Last event timestamp                            |
 | `event_duration_s`   | Total session duration in seconds               |
@@ -201,38 +251,50 @@ Joins `fct_all_session_events`, `dim_event_pages`, and `dim_devices`. Adds:
 
 ### Orchestration — `snowflake_orchestration.sql`
 
-Handles ongoing incremental loads after the initial `COPY INTO`.
+Sets up the objects and stored procedures that handle ongoing incremental loads after the initial build.
 
-**Pattern used:** Stream + `INSERT INTO`
+**Objects created:**
 
-- A Stream (`events_raw_to_base_stream`) is created on `amplitude_events_raw` with `APPEND_ONLY = TRUE`
-- The Stream captures only newly loaded rows — it does not reprocess existing data
-- An `INSERT INTO amplitude_events_base` statement reads from the Stream, applying the same JSON extraction and cleaning logic as the initial bronze build
+| Object                        | Type                          | Purpose                                                                                                      |
+| ----------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `amplitude_events_raw_stream` | Stream (`APPEND_ONLY = TRUE`) | Captures new rows loaded into `amplitude_events_raw` by Snowpipe                                             |
+| `sp_events_raw_to_base()`     | Stored Procedure              | Reads from the stream, applies JSON extraction and cleaning, inserts into `amplitude_events_base`            |
+| `sp_amplitude_silver()`       | Stored Procedure              | Inserts new rows into `fct_all_session_events` and `dim_event_pages`; merges into `dim_devices` (SCD Type 1) |
+| `sp_amplitude_gold()`         | Stored Procedure              | Inserts new rows into `all_events` and `session_journey`                                                     |
 
-> ⚠️ The `INSERT INTO` statement in `snowflake_orchestration.sql` intentionally replaces the `FROM amplitude_events_raw` clause in the bronze script with `FROM events_raw_to_base_stream`. The Stream is consumed on each run, so only new rows are processed.
+**Incremental load strategies by table:**
+
+| Table                    | Strategy                                    | Why                                                                                                                           |
+| ------------------------ | ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `amplitude_events_base`  | Stream + INSERT                             | Stream ensures only new raw rows are processed — consumed on each run                                                         |
+| `fct_all_session_events` | INSERT with `MAX(extract_timestamp)` filter | Append-only — events never change                                                                                             |
+| `dim_event_pages`        | INSERT with `MAX(extract_timestamp)` filter | Append-only — page events never change                                                                                        |
+| `dim_devices`            | MERGE (SCD Type 1)                          | Device attributes can change — new records inserted, changed records updated, `IS DISTINCT FROM` prevents unnecessary updates |
+| `all_events`             | INSERT filtered after window calculations   | `LEAD`/`LAG` require full session context before filtering                                                                    |
+| `session_journey`        | INSERT with `MAX(extract_timestamp)` filter | New sessions only — existing sessions are not reopened                                                                        |
+
+**To run the stored procedures manually:**
+
+```sql
+CALL sp_events_raw_to_base();
+CALL sp_amplitude_silver();
+CALL sp_amplitude_gold();
+```
 
 ---
 
-## Running the scripts
+### Reference — `snowflake_update_strategies.sql`
 
-Run the scripts in this order:
-
-```
-1. s3_to_snowflake_load.sql     — one-time setup + initial load
-2. amplitude_bronze.sql         — build amplitude_events_base
-3. amplitude_silver.sql         — build fact and dimension tables
-4. amplitude_gold.sql           — build analysis-ready output tables
-5. snowflake_orchestration.sql  — set up Stream + Snowpipe for ongoing loads
-```
-
-For ongoing daily loads, Snowpipe handles the raw → raw table step automatically. The Stream + `INSERT INTO` in `snowflake_orchestration.sql` then picks up new rows into the bronze table. The silver and gold tables would need to be rebuilt or converted to incremental patterns to reflect new data.
+Contains the raw SQL for each incremental update step, written out as standalone statements. Used during development to test and iterate on the logic before wrapping it into stored procedures. Not intended to be run as part of the regular pipeline.
 
 ---
 
 ## Key design decisions
 
-- **`VARIANT` for raw JSON** — schema never needs to change if Amplitude adds new event properties; all extraction happens in the bronze layer
+- **`VARIANT` for raw JSON** — the schema never needs to change if Amplitude adds new event properties; all field extraction happens in the bronze layer
 - **`filename` as the incremental key** — the filename encodes the extraction hour (e.g. `2026-05-14_2`), parsed as `extract_timestamp`. This is source-aligned and stable across reloads, unlike a Snowflake load timestamp
-- **`QUALIFY ROW_NUMBER()`** in `dim_devices` — deduplicates devices by keeping the most recent record per `device_id`, avoiding `SELECT DISTINCT *` which is unreliable on non-unique rows
+- **`APPEND_ONLY = TRUE` on the Stream** — Amplitude event data is immutable; there are no updates or deletes to capture from the raw table
+- **`QUALIFY ROW_NUMBER()`** in `dim_devices` — deduplicates by keeping the most recent device profile, avoiding `SELECT DISTINCT *` which is unreliable on non-unique rows
+- **`IS DISTINCT FROM`** in the `dim_devices` MERGE — prevents unnecessary updates when device attribute values haven't actually changed, avoiding silent overwrites of unchanged rows
 - **`FORCE = FALSE`** on COPY INTO — prevents re-ingestion of already-loaded files without needing manual deduplication
-- **`APPEND_ONLY = TRUE`** on the Stream — Amplitude event data is immutable; there are no updates or deletes to capture
+- **Separate stored procedures per layer** — each procedure can fail independently without stopping the others, making it easier to diagnose and rerun a specific layer

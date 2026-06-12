@@ -1,9 +1,9 @@
 //BUILD ALL_EVENTS
 ---------------------------------------------------------
-create or replace table all_events as (
+CREATE OR REPLACE TABLE all_events AS (
 
-with join_tables as (
-    select
+WITH join_tables AS (
+    SELECT
         e.event_uuid,
         e.session_id,
         e.device_id,
@@ -18,19 +18,19 @@ with join_tables as (
         p.element_text,
         p.element_tag,
         p.element_url,
-        lead(e.event_time) over (partition by session_id order by event_time) as next_event_time,
-        lag(e.event_type) over (partition by session_id order by event_time) as previous_event_type,
-        lag(p.page_url) over (partition by session_id order by event_time) as previous_page_url,
+        LEAD(e.event_time) OVER (PARTITION BY session_id ORDER BY event_time) AS next_event_time,
+        LAG(e.event_type) OVER (PARTITION BY session_id ORDER BY event_time) AS previous_event_type,
+        LAG(p.page_url) OVER (PARTITION BY session_id ORDER BY event_time) AS previous_page_url,
         e.extract_timestamp
-    from fct_all_session_events e
-    left join dim_event_pages p
-        on e.event_uuid = p.event_uuid
-    left join dim_devices d
-        on e.device_id = d.device_id
+    FROM fct_all_session_events e
+    LEFT JOIN dim_event_pages p
+        ON e.event_uuid = p.event_uuid
+    LEFT JOIN dim_devices d
+        ON e.device_id = d.device_id
 )
 
-,calculations as (
-    select
+,calculations AS (
+    SELECT
         event_uuid,
         session_id,
         device_id,
@@ -38,8 +38,8 @@ with join_tables as (
         platform,
         event_type,
         event_time,
-        (datediff('second',event_time,next_event_time)*1.0) as event_duration_s,
-        row_number() over (partition by session_id order by event_time) as event_counter,
+        (DATEDIFF('second',event_time,next_event_time)*1.0) AS event_duration_s,
+        ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY event_time) AS event_counter,
         page_url,
         page_counter,
         page_title,
@@ -47,57 +47,58 @@ with join_tables as (
         element_text,
         element_tag,
         element_url,
-        (case 
-            when event_type = previous_event_type and page_url = previous_page_url then true
-            else false 
-        end) as previous_event_repeated,
-        (case
-            when previous_event_type = 'Element Clicked' and page_url = previous_page_url then true
-            else false
-        end) as click_error,
+        (CASE
+            WHEN event_type = previous_event_type AND page_url = previous_page_url THEN TRUE
+            ELSE FALSE
+        END) AS previous_event_repeated,
+        (CASE
+            WHEN previous_event_type = 'Element Clicked' AND page_url = previous_page_url THEN TRUE
+            ELSE FALSE
+        END) AS click_error,
         extract_timestamp
-    from join_tables
+    FROM join_tables
 )
 
-select * from calculations
-order by session_id, event_time
+SELECT * FROM calculations
+ORDER BY session_id, event_time
 
 );
 
 //BUILD SESSION_JOURNEY
 ---------------------------------------------------------
-create or replace table session_journey as (
+CREATE OR REPLACE TABLE session_journey AS (
 
-with page_view_counts as (
-    select
+WITH page_view_counts AS (
+    SELECT
         e.session_id,
-        listagg(p.page_title,', ') as page_path,
-        count(*) as total_pages_viewed
-    from fct_all_session_events e
-    left join dim_event_pages p
-        on e.event_uuid = p.event_uuid
-    where e.event_type = 'Page Viewed'
-    group by e.session_id
+        LISTAGG(p.page_title,', ') AS page_path,
+        COUNT(*) AS total_pages_viewed
+    FROM fct_all_session_events e
+    LEFT JOIN dim_event_pages p
+        ON e.event_uuid = p.event_uuid
+    WHERE e.event_type = 'Page Viewed'
+    GROUP BY e.session_id
 )
 
-, all_event_counts as (
-    select
+, all_event_counts AS (
+    SELECT
         e.session_id,
         d.device_id,
         d.device_type,
         d.platform,
-        count(*) as total_events,
-        min(e.event_time) as session_start_time,
-        max(e.event_time) as session_end_time,
-        datediff('second',min(e.event_time),max(e.event_time)) as event_duration_s
-    from fct_all_session_events e
-    left join dim_devices d 
-        on e.device_id = d.device_id
-    group by e.session_id, d.device_id, d.device_type, d.platform     
+        COUNT(*) AS total_events,
+        MIN(e.event_time) AS session_start_time,
+        MAX(e.event_time) AS session_end_time,
+        DATEDIFF('second',MIN(e.event_time),MAX(e.event_time)) AS event_duration_s,
+        MAX(e.extract_timestamp) AS extract_timestamp
+    FROM fct_all_session_events e
+    LEFT JOIN dim_devices d
+        ON e.device_id = d.device_id
+    GROUP BY e.session_id, d.device_id, d.device_type, d.platform
 )
 
-,join_tables as (
-    select
+,join_tables AS (
+    SELECT
         e.session_id,
         e.device_id,
         e.device_type,
@@ -107,11 +108,12 @@ with page_view_counts as (
         p.total_pages_viewed,
         e.session_start_time,
         e.session_end_time,
-        e.event_duration_s
-    from all_event_counts e
-    inner join page_view_counts p 
-    on e.session_id = p.session_id  
+        e.event_duration_s,
+        e.extract_timestamp
+    FROM all_event_counts e
+    INNER JOIN page_view_counts p
+    ON e.session_id = p.session_id
 )
-select * from join_tables
+SELECT * FROM join_tables
 
 );

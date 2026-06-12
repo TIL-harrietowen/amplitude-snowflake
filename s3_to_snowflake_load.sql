@@ -25,7 +25,7 @@ CREATE OR REPLACE STAGE amplitude-stage
   URL = 's3://my-bucket/path/to/data/'
   FILE_FORMAT = amplitude-file-format;
 
-list @amplitude-stage;
+LIST @amplitude-stage;
 
 CREATE OR REPLACE TABLE amplitude_events_raw (
   json_data VARIANT,
@@ -36,9 +36,9 @@ CREATE OR REPLACE TABLE amplitude_events_raw (
 -----------------------------------
 COPY INTO amplitude_events_raw
 FROM
-    (select
+    (SELECT
         $1,
-        metadata$filename
+        METADATA$FILENAME
     FROM @amplitude-stage)
 FILE_FORMAT = (FORMAT_NAME = amplitude-file-format);
 
